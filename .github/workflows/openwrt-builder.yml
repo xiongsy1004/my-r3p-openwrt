@@ -7,14 +7,20 @@ on:
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
+
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
+
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
+
   TZ: Asia/Shanghai
+
+  # ccache
+  CCACHE_DIR: /workdir/.ccache
 
 jobs:
   build:
@@ -22,226 +28,557 @@ jobs:
 
     steps:
 
+    # =========================================================
+    # 1. Checkout
+    # =========================================================
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
 
+    # =========================================================
+    # 2. 初始化编译环境
+    # =========================================================
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
+        echo "===== Clean environment ====="
+
         sudo rm -rf /etc/apt/sources.list.d/*
         sudo docker image prune --all --force
 
+        echo "===== Update apt ====="
+
         sudo -E apt-get -qq update
 
+        echo "===== Install build dependencies ====="
+
         sudo -E apt-get -qq install \
-        build-essential \
-        ccache \
-        cmake \
-        curl \
-        flex \
-        gawk \
-        gettext \
-        git \
-        gperf \
-        haveged \
-        libelf-dev \
-        libncurses5-dev \
-        libncursesw5-dev \
-        libssl-dev \
-        python3 \
-        python3-pyelftools \
-        python3-setuptools \
-        rsync \
-        unzip \
-        wget \
-        zlib1g-dev
+          ack \
+          antlr3 \
+          asciidoc \
+          autoconf \
+          automake \
+          autopoint \
+          binutils \
+          bison \
+          build-essential \
+          bzip2 \
+          ccache \
+          cmake \
+          cpio \
+          curl \
+          device-tree-compiler \
+          fastjar \
+          flex \
+          gawk \
+          gettext \
+          gcc-multilib \
+          g++-multilib \
+          git \
+          gperf \
+          haveged \
+          help2man \
+          intltool \
+          libc6-dev-i386 \
+          libelf-dev \
+          libfuse-dev \
+          libglib2.0-dev \
+          libgmp3-dev \
+          libltdl-dev \
+          libmpc-dev \
+          libmpfr-dev \
+          libncurses5-dev \
+          libncursesw5-dev \
+          libpython3-dev \
+          libreadline-dev \
+          libssl-dev \
+          libtool \
+          lrzsz \
+          mkisofs \
+          msmtp \
+          ninja-build \
+          p7zip \
+          p7zip-full \
+          patch \
+          pkgconf \
+          python3 \
+          python3-pyelftools \
+          python3-setuptools \
+          qemu-utils \
+          rsync \
+          scons \
+          squashfs-tools \
+          subversion \
+          swig \
+          texinfo \
+          uglifyjs \
+          unzip \
+          vim \
+          wget \
+          xmlto \
+          xxd \
+          zlib1g-dev
+
+        echo "===== Cleanup apt ====="
 
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
 
+        echo "===== Timezone ====="
+
         sudo timedatectl set-timezone "$TZ"
+
+        echo "===== Create workdir ====="
 
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
 
+        echo "===== Environment ready ====="
 
+
+    # =========================================================
+    # 3. ccache 缓存
+    # =========================================================
+    - name: Restore ccache
+      uses: actions/cache@v4
+      with:
+        path: /workdir/.ccache
+        key: openwrt-ccache-${{ runner.os }}-${{ hashFiles('.config', 'diy-part1.sh', 'diy-part2.sh') }}
+        restore-keys: |
+          openwrt-ccache-${{ runner.os }}-
+
+
+    # =========================================================
+    # 4. 配置 ccache
+    # =========================================================
+    - name: Configure ccache
+      run: |
+        echo "===== Configure ccache ====="
+
+        mkdir -p /workdir/.ccache
+
+        ccache --set-config=cache_dir=/workdir/.ccache
+        ccache --max-size=3G
+        ccache --set-config=compression=true
+
+        echo "===== ccache config ====="
+
+        ccache --show-config
+
+
+    # =========================================================
+    # 5. Clone LEDE
+    # =========================================================
     - name: Clone source code
       working-directory: /workdir
       run: |
-        df -hT $PWD
+        echo "===== Disk before clone ====="
+        df -hT
 
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        echo "===== Clone OpenWrt source ====="
 
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        git clone \
+          --depth=1 \
+          --single-branch \
+          -b "$REPO_BRANCH" \
+          "$REPO_URL" \
+          openwrt
+
+        echo "===== Create workspace link ====="
+
+        ln -sf /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
+
+        echo "===== Source information ====="
+
+        cd /workdir/openwrt
+
+        git log -1 --oneline
 
 
+    # =========================================================
+    # 6. 加载自定义 feeds
+    # =========================================================
     - name: Load custom feeds
       run: |
+        echo "===== Load feeds configuration ====="
 
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        if [ -e "$FEEDS_CONF" ]; then
+          mv "$FEEDS_CONF" openwrt/feeds.conf.default
+        fi
 
-        chmod +x $DIY_P1_SH
+        chmod +x "$DIY_P1_SH"
 
         cd openwrt
 
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        "$GITHUB_WORKSPACE/$DIY_P1_SH"
+
+        echo "===== feeds.conf.default ====="
+
+        cat feeds.conf.default
 
 
+    # =========================================================
+    # 7. Update feeds
+    # =========================================================
     - name: Update feeds
       run: |
         cd openwrt
 
+        echo "===== Update feeds ====="
+
         ./scripts/feeds update -a
 
 
+    # =========================================================
+    # 8. Install feeds
+    # =========================================================
     - name: Install feeds
       run: |
         cd openwrt
 
+        echo "===== Install feeds ====="
+
         ./scripts/feeds install -a
 
 
+    # =========================================================
+    # 9. 检查 PassWall2
+    # =========================================================
     - name: Check PassWall2 feeds
       run: |
         cd openwrt
 
-        echo "===== passwall check ====="
+        echo "======================================"
+        echo "        PassWall2 Feed Check"
+        echo "======================================"
+
+        echo ""
+        echo "===== Feed list ====="
 
         ./scripts/feeds list | grep passwall || true
 
-        echo "===== packages ====="
+        echo ""
+        echo "===== PassWall packages ====="
 
-        ls feeds/passwall_packages || true
+        ls -lah feeds/passwall_packages || true
+
+        echo ""
+        echo "===== PassWall2 packages ====="
+
+        find feeds/passwall_packages \
+          -maxdepth 2 \
+          -type d \
+          | head -100 || true
+
+        echo ""
+        echo "===== Search luci-app-passwall2 ====="
+
+        find package feeds \
+          -type d \
+          -name "luci-app-passwall2" \
+          2>/dev/null || true
 
 
+    # =========================================================
+    # 10. 加载 .config
+    # =========================================================
     - name: Load custom configuration
       run: |
+        echo "===== Load custom files ====="
 
-        [ -e files ] && mv files openwrt/files
+        if [ -e files ]; then
+          mv files openwrt/files
+        fi
 
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        if [ -e "$CONFIG_FILE" ]; then
+          mv "$CONFIG_FILE" openwrt/.config
+        fi
 
-        chmod +x $DIY_P2_SH
+        chmod +x "$DIY_P2_SH"
 
         cd openwrt
 
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        "$GITHUB_WORKSPACE/$DIY_P2_SH"
+
+        echo ""
+        echo "===== Target configuration ====="
+
+        grep "^CONFIG_TARGET" .config | head -30 || true
+
+        echo ""
+        echo "===== PassWall2 configuration ====="
+
+        grep "PASSWALL" .config || true
+
+        echo ""
+        echo "===== Target device ====="
+
+        grep "^CONFIG_TARGET.*DEVICE.*=y" .config || true
 
 
-    - name: Download package
+    # =========================================================
+    # 11. 下载源码缓存
+    # =========================================================
+    - name: Restore OpenWrt download cache
+      uses: actions/cache@v4
+      with:
+        path: /workdir/openwrt/dl
+        key: openwrt-dl-${{ runner.os }}-${{ hashFiles('.config', 'feeds.conf.default', 'diy-part1.sh') }}
+        restore-keys: |
+          openwrt-dl-${{ runner.os }}-
+
+
+    # =========================================================
+    # 12. defconfig
+    # =========================================================
+    - name: Configure OpenWrt
+      run: |
+        cd openwrt
+
+        echo "===== make defconfig ====="
+
+        make defconfig
+
+        echo ""
+        echo "===== Final target ====="
+
+        grep "^CONFIG_TARGET.*DEVICE.*=y" .config || true
+
+        echo ""
+        echo "===== Final PassWall2 ====="
+
+        grep "^CONFIG_PACKAGE_luci-app-passwall2" .config || true
+
+        echo ""
+        echo "===== Final config size ====="
+
+        wc -l .config
+
+
+    # =========================================================
+    # 13. Download packages
+    # =========================================================
+    - name: Download packages
       id: package
       run: |
-
         cd openwrt
 
+        echo "======================================"
+        echo "          Download Packages"
+        echo "======================================"
 
-        echo "===== defconfig ====="
+        make download -j8
 
-        make defconfig V=s
+        echo ""
+        echo "===== Check broken downloads ====="
 
+        find dl -size -1024c \
+          -exec ls -lh {} \; || true
 
-        echo "===== download ====="
+        echo ""
+        echo "===== Remove broken downloads ====="
 
-        make download -j8 V=s
-
-
-        echo "===== remove broken downloads ====="
-
-        find dl -size -1024c -exec ls -lh {} \;
-
-        find dl -size -1024c -exec rm -f {} \;
+        find dl -size -1024c \
+          -exec rm -f {} \; || true
 
 
+    # =========================================================
+    # 14. 编译
+    # =========================================================
     - name: Compile firmware
       id: compile
       run: |
-
         cd openwrt
 
+        echo "======================================"
+        echo "          Compile Firmware"
+        echo "======================================"
 
-        echo "===== compile fast ====="
+        echo "CPU threads:"
+        nproc
 
+        echo ""
+        echo "Memory:"
+        free -h
 
-        make -j$(nproc) V=s || make -j1 V=s
+        echo ""
+        echo "Disk:"
+        df -hT
 
+        echo ""
+        echo "===== ccache before compile ====="
 
-        echo "status=success" >> $GITHUB_OUTPUT
+        ccache --show-stats || true
 
+        echo ""
+        echo "===== Start parallel compile ====="
+
+        make -j$(nproc)
+
+        echo ""
+        echo "===== Compile finished ====="
+
+        echo "status=success" >> "$GITHUB_OUTPUT"
+
+        echo ""
+        echo "===== Device name ====="
 
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config \
-        | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+          | sed -r 's/.*DEVICE_(.*)=y/\1/' \
+          > DEVICE_NAME
+
+        if [ -s DEVICE_NAME ]; then
+          echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> "$GITHUB_ENV"
+          cat DEVICE_NAME
+        fi
+
+        echo ""
+        echo "===== File date ====="
+
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
+
+        echo ""
+        echo "===== ccache after compile ====="
+
+        ccache --show-stats || true
 
 
-        [ -s DEVICE_NAME ] && \
-        echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+    # =========================================================
+    # 15. 编译失败时输出诊断信息
+    # =========================================================
+    - name: Build diagnostics
+      if: failure()
+      run: |
+        echo "======================================"
+        echo "          BUILD DIAGNOSTICS"
+        echo "======================================"
+
+        echo ""
+        echo "===== Memory ====="
+
+        free -h
+
+        echo ""
+        echo "===== Disk ====="
+
+        df -hT
+
+        echo ""
+        echo "===== ccache ====="
+
+        ccache --show-stats || true
+
+        echo ""
+        echo "===== Recent kernel messages ====="
+
+        dmesg | tail -100 || true
 
 
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-
+    # =========================================================
+    # 16. 检查磁盘
+    # =========================================================
     - name: Check space usage
       if: (!cancelled())
-      run: df -hT
+      run: |
+        echo "===== Disk usage ====="
+
+        df -hT
+
+        echo ""
+        echo "===== OpenWrt directory ====="
+
+        du -sh /workdir/openwrt 2>/dev/null || true
+
+        echo ""
+        echo "===== Download cache ====="
+
+        du -sh /workdir/openwrt/dl 2>/dev/null || true
+
+        echo ""
+        echo "===== ccache ====="
+
+        du -sh /workdir/.ccache 2>/dev/null || true
 
 
-    - name: Organize files
+    # =========================================================
+    # 17. 整理固件
+    # =========================================================
+    - name: Organize firmware
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-
         cd openwrt/bin/targets/*/*
+
+        echo "===== Firmware directory ====="
+
+        pwd
+
+        echo ""
+        echo "===== Files ====="
+
+        ls -lah
+
+        echo ""
+        echo "===== Remove packages directory ====="
 
         rm -rf packages
 
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
 
-        echo "status=success" >> $GITHUB_OUTPUT
+        echo "status=success" >> "$GITHUB_OUTPUT"
 
 
+    # =========================================================
+    # 18. 上传 Artifact
+    # =========================================================
     - name: Upload firmware
-      uses: actions/upload-artifact@main
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success'
       with:
-
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-
         path: ${{ env.FIRMWARE }}
+        if-no-files-found: error
 
 
+    # =========================================================
+    # 19. 创建 Release
+    # =========================================================
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> "$GITHUB_OUTPUT"
 
         touch release.txt
 
-        echo "status=success" >> $GITHUB_OUTPUT
+        echo "R3P OpenWrt firmware" >> release.txt
+        echo "" >> release.txt
+        echo "Target: Xiaomi Mi Router 3 Pro" >> release.txt
+        echo "Build time: $(date)" >> release.txt
+
+        echo "status=success" >> "$GITHUB_OUTPUT"
 
 
+    # =========================================================
+    # 20. 上传 Release
+    # =========================================================
     - name: Upload firmware release
-      uses: softprops/action-gh-release@master
+      uses: softprops/action-gh-release@v2
       if: steps.tag.outputs.status == 'success'
       env:
-
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       with:
-
         tag_name: ${{ steps.tag.outputs.release_tag }}
-
         body_path: release.txt
-
         files: ${{ env.FIRMWARE }}/*
 
 
+    # =========================================================
+    # 21. 删除旧 Actions
+    # =========================================================
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@main
       with:
-
         retain_days: 0
-
         keep_minimum_runs: 2
